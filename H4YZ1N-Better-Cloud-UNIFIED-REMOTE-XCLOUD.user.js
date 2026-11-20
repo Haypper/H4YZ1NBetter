@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         H4YZ1N-Better Cloud UNIFIED - Force Old Site + DLSS5 + RHI + GTA
 // @namespace    https://www.instagram.com/xzfelipezs
-// @version      7.5.0-h4yz1n
-// @description  H4YZ1N-Better Cloud — Script único: migration/clear + DLSS 5 + RHI + GTA V + Safari Direct + pipeline Veyra portado (SR/CAS, NR em camadas, FXAA, cor, HDR, FG Lite, screenshot/gravação). Funciona em Remote Play e Play na Nuvem. Por H4YZ1N (@xzfelipezs)
+// @version      7.9.0-h4yz1n-xpad-presets
+// @description  H4YZ1N-Better Cloud — Script único: migration/clear + DLSS 5 + RHI + GTA V + XPAD (teclado+mouse viram controle + redefinir teclas + presets GTA 5 / Brawlhalla / Forza 6) + Safari Direct + pipeline Veyra portado (SR/CAS, NR em camadas, FXAA, cor, HDR, FG Lite, screenshot/gravação). Funciona em Remote Play e Play na Nuvem. Por H4YZ1N (@xzfelipezs)
 // @author       H4YZ1N — Felipe S. D. Santos (@xzfelipezs)
 // @homepageURL  https://www.instagram.com/xzfelipezs
 // @supportURL   https://www.instagram.com/xzfelipezs
@@ -721,12 +721,369 @@ main();
     { name: 'Comet', seq: ['RB','B','RT','RIGHT','LB','LT','A','A','X','RB'], phone: '1-999-266-38', cat: 'veiculos' },
     { name: 'Rapid GT', seq: ['RT','LB','B','RIGHT','LB','RB','RIGHT','LEFT','B','RT'], phone: '1-999-727-4348', cat: 'veiculos' }
   ];
-  var virtualState = null;
+    var virtualState = null;
   var isAutomating = false;
   var origGetGamepads = navigator.getGamepads ? navigator.getGamepads.bind(navigator) : function () { return []; };
   function createEmptyGamepad() {
     return { id: 'Xbox 360 Controller', index: 0, connected: true, timestamp: performance.now(), mapping: 'standard', axes: [0, 0, 0, 0], buttons: Array.from({ length: 17 }, function () { return { pressed: false, touched: false, value: 0 }; }), hapticActuators: [] };
   }
+  // ==================== XPAD — TECLADO + MOUSE VIRAM CONTROLE XBOX ====================
+  // Como funciona: o xCloud / Remote Play lê o controle por navigator.getGamepads().
+  // O XPAD cria um controle virtual no slot 0 e traduz teclado + mouse + toque p/ ele.
+  // Funciona nos 2 modos (video = nuvem, canvas = Remote) porque os 2 usam a mesma API.
+  // Se um controle físico (ex: GameSir) já estiver conectado, o XPAD cede o slot 0 p/ ele
+  // — a não ser que "Forçar XPAD" esteja ligado. Cheat do GTA tem prioridade sobre o XPAD.
+  // MAPA OFICIAL XPAD (teclado -> Xbox) — também aparece na aba XPAD do painel:
+  //   WASD / Setas-esq = Analógico ESQ (mover) | MOUSE = Analógico DIR (mira)
+  //   Clique ESQ / T = RT (atirar) | Clique DIR / G = LT (mirar)
+  //   ESPAÇO = A (pular/confirmar) | SHIFT ESQ / C = B (cancelar/correr)
+  //   R = X (recarregar) | F = Y (interagir) | Q = LB | E = RB
+  //   TAB = View (voltar) | ENTER / P = Menu / PAUSE | G = Nexus (Xbox) | H = Share
+  //   CTRL ESQ / Z = L3 (agachar) | ALT / V = R3 | SETAS = D-Pad
+  //   ESC = solta o mouse / abre o painel (NÃO vai p/ o jogo, p/ não travar)
+  var xpad = { enabled: true, force: false, sens: 0.9, showTouch: false, mouseMode: 'lock' };
+  try {
+    var _xe = localStorage.getItem('h4yz1n-xpad-enabled'); if (_xe !== null) xpad.enabled = (_xe === '1');
+    var _xf = localStorage.getItem('h4yz1n-xpad-force'); if (_xf !== null) xpad.force = (_xf === '1');
+    var _xs = parseFloat(localStorage.getItem('h4yz1n-xpad-sens') || '0.9'); if (!isNaN(_xs)) xpad.sens = Math.max(0.2, Math.min(2, _xs));
+    var _xt = localStorage.getItem('h4yz1n-xpad-touch'); if (_xt !== null) xpad.showTouch = (_xt === '1');
+    else { try { xpad.showTouch = (('ontouchstart' in window || (navigator.maxTouchPoints || 0) > 0) && !(window.matchMedia && window.matchMedia('(pointer:fine)').matches)); } catch (e) {} }
+    var _xm = localStorage.getItem('h4yz1n-xpad-mouse'); if (_xm) xpad.mouseMode = _xm;
+  } catch (e) {}
+  function saveXpad() {
+    try {
+      localStorage.setItem('h4yz1n-xpad-enabled', xpad.enabled ? '1' : '0');
+      localStorage.setItem('h4yz1n-xpad-force', xpad.force ? '1' : '0');
+      localStorage.setItem('h4yz1n-xpad-sens', String(xpad.sens));
+      localStorage.setItem('h4yz1n-xpad-touch', xpad.showTouch ? '1' : '0');
+      localStorage.setItem('h4yz1n-xpad-mouse', xpad.mouseMode);
+    } catch (e) {}
+  }
+  // ---------- XPAD KEYMAP — REDEFINIR TECLAS + PRESETS DE PC ----------
+  // Cada ação tem 1 ou mais teclas (ex: B = SHIFT ESQ / C de fábrica).
+  // "Trocar" substitui pela tecla nova — a antiga deixa de funcionar p/ aquela ação.
+  // Se a tecla nova já era de outra ação, ela muda de dono (rouba) p/ não disparar 2 botões.
+  // Presets podem ter a MESMA tecla em 2 ações de propósito (ex: Forza W = stick + RT,
+  // Brawlhalla K = B + Y) — por isso preset aplica direto, sem roubar.
+  var XPAD_DEFAULT_MAP = {
+    MOVE_UP: ['KeyW'], MOVE_DOWN: ['KeyS'], MOVE_LEFT: ['KeyA'], MOVE_RIGHT: ['KeyD'],
+    A: ['Space'], B: ['ShiftLeft', 'ShiftRight', 'KeyC'], X: ['KeyR'], Y: ['KeyF'],
+    LB: ['KeyQ'], RB: ['KeyE'], LT: ['KeyG'], RT: ['KeyT'],
+    VIEW: ['Tab'], MENU: ['Enter', 'KeyP'], L3: ['ControlLeft', 'KeyZ'], R3: ['AltLeft', 'KeyV'],
+    UP: ['ArrowUp'], DOWN: ['ArrowDown'], LEFT: ['ArrowLeft'], RIGHT: ['ArrowRight'],
+    NEXUS: ['KeyN'], SHARE: ['KeyH']
+  };
+  var XPAD_ACTION_ORDER = ['MOVE_UP','MOVE_DOWN','MOVE_LEFT','MOVE_RIGHT','A','B','X','Y','LB','RB','LT','RT','UP','DOWN','LEFT','RIGHT','VIEW','MENU','NEXUS','SHARE','L3','R3'];
+  var XPAD_ACTION_LABELS = {
+    MOVE_UP: 'Mover ↑', MOVE_DOWN: 'Mover ↓', MOVE_LEFT: 'Mover ←', MOVE_RIGHT: 'Mover →',
+    A: 'A — pular / confirmar', B: 'B — cancelar / correr', X: 'X — recarregar', Y: 'Y — interagir',
+    LB: 'LB', RB: 'RB', LT: 'LT — mirar (teclado)', RT: 'RT — atirar (teclado)',
+    UP: 'D-Pad ↑', DOWN: 'D-Pad ↓', LEFT: 'D-Pad ←', RIGHT: 'D-Pad →',
+    VIEW: 'View (voltar)', MENU: 'Menu / Pause', NEXUS: 'Nexus (Xbox)', SHARE: 'Share',
+    L3: 'L3 — agachar', R3: 'R3'
+  };
+  function xpadCloneMap(m) { var o = {}; Object.keys(m).forEach(function (k) { o[k] = (m[k] || []).slice(); }); return o; }
+  // ---------- PRESETS — TECLAS IGUAIS DE PC ----------
+  // A tecla que você aperta é a do PC, e ela dispara o botão do Xbox que faz a mesma ação no console.
+  var XPAD_PRESETS = {
+    padrao: { label: 'Padrão H4YZ1N', emoji: '🎮', desc: 'Mapa equilibrado p/ qualquer jogo: WASD mover, Espaço = A, Shift = B, R = X, F = Y, Q = LB, E = RB, T = RT, G = LT.', map: null },
+    gta5: { label: 'GTA 5 — PC', emoji: '🚗', desc: 'Igual PC: Shift = correr (A), Espaço = pular / freio de mão no carro (X), F = entrar no carro (Y), E/R = interagir / recarregar (RB), Q = cobertura (LB), C = agachar (B). No carro, W = acelerar, S = frear, Espaço = freio de mão.',
+      map: { MOVE_UP: ['KeyW'], MOVE_DOWN: ['KeyS'], MOVE_LEFT: ['KeyA'], MOVE_RIGHT: ['KeyD'], A: ['ShiftLeft', 'ShiftRight'], B: ['KeyC'], X: ['Space'], Y: ['KeyF'], LB: ['KeyQ'], RB: ['KeyE', 'KeyR'], LT: ['KeyG'], RT: ['KeyT'], VIEW: ['Tab'], MENU: ['Enter', 'KeyP'], L3: ['ControlLeft'], R3: ['AltLeft'], UP: ['ArrowUp'], DOWN: ['ArrowDown'], LEFT: ['ArrowLeft'], RIGHT: ['ArrowRight'], NEXUS: ['KeyN'], SHARE: ['KeyH'] } },
+    brawlhalla: { label: 'Brawlhalla — PC', emoji: '⚔️', desc: 'Igual PC (J/K/L/I): Espaço = pular (A), J = ataque leve (X), K = ataque pesado (B + Y), L = esquiva (LT + RT), I = pegar / jogar (LB + RB). WASD move — W pra cima também pula, como no jogo.',
+      map: { MOVE_UP: ['KeyW'], MOVE_DOWN: ['KeyS'], MOVE_LEFT: ['KeyA'], MOVE_RIGHT: ['KeyD'], A: ['Space'], B: ['KeyK'], X: ['KeyJ'], Y: ['KeyK'], LB: ['KeyI'], RB: ['KeyI'], LT: ['KeyL'], RT: ['KeyL'], VIEW: ['Tab'], MENU: ['Enter', 'KeyP'], L3: ['ShiftLeft'], R3: ['KeyV'], UP: ['ArrowUp'], DOWN: ['ArrowDown'], LEFT: ['ArrowLeft'], RIGHT: ['ArrowRight'], NEXUS: ['KeyN'], SHARE: ['KeyH'] } },
+    forza6: { label: 'Forza 6 — PC', emoji: '🏎️', desc: 'Igual PC de corrida: W = acelerar (RT), S = frear (LT), A/D = virar (stick), Espaço = freio de mão (A), R = rewind / voltar no tempo (Y), E = subir marcha (X), Q = descer marcha (B), C = câmera (LB).',
+      map: { MOVE_UP: ['KeyW'], MOVE_DOWN: ['KeyS'], MOVE_LEFT: ['KeyA'], MOVE_RIGHT: ['KeyD'], A: ['Space'], B: ['KeyQ'], X: ['KeyE'], Y: ['KeyR'], LB: ['KeyC'], RB: ['KeyF'], LT: ['KeyS'], RT: ['KeyW'], VIEW: ['Tab'], MENU: ['Enter', 'KeyP'], L3: ['ControlLeft'], R3: ['AltLeft'], UP: ['ArrowUp'], DOWN: ['ArrowDown'], LEFT: ['ArrowLeft'], RIGHT: ['ArrowRight'], NEXUS: ['KeyN'], SHARE: ['KeyH'] } }
+  };
+  XPAD_PRESETS.padrao.map = xpadCloneMap(XPAD_DEFAULT_MAP);
+  var XPAD_PRESET_ORDER = ['padrao', 'gta5', 'brawlhalla', 'forza6'];
+  var xpadKeymap = {};
+  var xpadPreset = 'padrao';
+  try { var _pp = localStorage.getItem('h4yz1n-xpad-preset'); if (_pp && XPAD_PRESETS[_pp]) xpadPreset = _pp; else if (_pp === 'custom') xpadPreset = 'custom'; } catch (e) {}
+  function saveXpadPreset() { try { localStorage.setItem('h4yz1n-xpad-preset', xpadPreset); } catch (e) {} }
+  function xpadLoadKeymap() {
+    try {
+      var raw = localStorage.getItem('h4yz1n-xpad-keymap');
+      if (raw) {
+        var saved = JSON.parse(raw) || {};
+        Object.keys(XPAD_DEFAULT_MAP).forEach(function (k) {
+          var v = saved[k];
+          if (typeof v === 'string' && v) xpadKeymap[k] = [v];
+          else if (Array.isArray(v) && v.length) xpadKeymap[k] = v.slice();
+          else xpadKeymap[k] = XPAD_DEFAULT_MAP[k].slice();
+        });
+        return;
+      }
+      xpadKeymap = xpadCloneMap(XPAD_PRESETS[xpadPreset === 'custom' ? 'padrao' : xpadPreset].map);
+    } catch (e) { xpadKeymap = xpadCloneMap(XPAD_DEFAULT_MAP); }
+  }
+  xpadLoadKeymap();
+  function saveXpadKeymap() { try { localStorage.setItem('h4yz1n-xpad-keymap', JSON.stringify(xpadKeymap)); } catch (e) {} }
+  function xpadHas(action) {
+    var arr = xpadKeymap[action] || [];
+    for (var i = 0; i < arr.length; i++) if (xpadKeys[arr[i]]) return true;
+    return false;
+  }
+  function xpadAllCodes() {
+    var out = [];
+    Object.keys(xpadKeymap).forEach(function (k) { (xpadKeymap[k] || []).forEach(function (c) { if (out.indexOf(c) === -1) out.push(c); }); });
+    return out;
+  }
+  function xpadKeyLabel(code) {
+    var m = { Space: 'ESPAÇO', ShiftLeft: 'SHIFT ESQ', ShiftRight: 'SHIFT DIR', ControlLeft: 'CTRL ESQ', ControlRight: 'CTRL DIR', AltLeft: 'ALT ESQ', AltRight: 'ALT DIR', Tab: 'TAB', Enter: 'ENTER', Escape: 'ESC', ArrowUp: 'SETA ↑', ArrowDown: 'SETA ↓', ArrowLeft: 'SETA ←', ArrowRight: 'SETA →', Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/', Backslash: '\\' };
+    if (m[code]) return m[code];
+    if (code.indexOf('Key') === 0) return code.slice(3);
+    if (code.indexOf('Digit') === 0) return code.slice(5);
+    if (code.indexOf('Numpad') === 0) return 'NUM ' + code.slice(6);
+    return code;
+  }
+  function xpadKeymapLabel(action) {
+    var arr = xpadKeymap[action] || [];
+    if (!arr.length) return '— SEM TECLA —';
+    return arr.map(xpadKeyLabel).join(' / ');
+  }
+  function xpadMarkCustom() { if (xpadPreset !== 'custom') { xpadPreset = 'custom'; saveXpadPreset(); } }
+  function xpadSetKey(action, newCode) {
+    Object.keys(xpadKeymap).forEach(function (k) {
+      if (k === action) return;
+      xpadKeymap[k] = (xpadKeymap[k] || []).filter(function (c) { return c !== newCode; });
+    });
+    xpadKeymap[action] = [newCode];
+    xpadMarkCustom();
+  }
+  function xpadApplyPreset(id) {
+    if (!XPAD_PRESETS[id]) return false;
+    xpadKeymap = xpadCloneMap(XPAD_PRESETS[id].map);
+    xpadPreset = id;
+    saveXpadKeymap(); saveXpadPreset();
+    xpadKeys = {}; try { xpadRefreshFromKeys(); } catch (e) {}
+    return true;
+  }
+  function xpadResetKeymap() {
+    xpadApplyPreset('padrao');
+  }
+  var xpadRebinding = null;
+  function xpadCancelRebind() {
+    if (xpadRebinding && xpadRebinding.onDone) { try { xpadRebinding.onDone(null); } catch (e) {} }
+    xpadRebinding = null;
+  }
+  var xpadState = null;
+  var xpadKeys = {}; // e.code -> true
+  var xpadMouse = { rx: 0, ry: 0, lastMove: 0, locked: false, dragging: false, lastX: 0, lastY: 0 };
+  var xpadTouch = { lx: 0, ly: 0, active: false };
+  function xpadEnsureState() {
+    if (!xpadState) xpadState = createEmptyGamepad();
+    xpadState.id = 'Xbox 360 Controller (H4YZ1N XPAD)';
+    xpadState.index = 0; xpadState.connected = true; xpadState.mapping = 'standard';
+    return xpadState;
+  }
+  function xpadSetBtn(idx, down, val) {
+    var st = xpadEnsureState();
+    var b = st.buttons[idx]; if (!b) return;
+    b.pressed = !!down; b.touched = !!down; b.value = down ? (typeof val === 'number' ? val : 1) : 0;
+  }
+  function xpadRefreshFromKeys() {
+    var st = xpadEnsureState();
+    var x = ((xpadHas('MOVE_RIGHT') ? 1 : 0) - (xpadHas('MOVE_LEFT') ? 1 : 0));
+    var y = ((xpadHas('MOVE_DOWN') ? 1 : 0) - (xpadHas('MOVE_UP') ? 1 : 0));
+    if (xpadTouch.active) { x = xpadTouch.lx; y = xpadTouch.ly; }
+    if (x !== 0 && y !== 0) { x *= 0.7071; y *= 0.7071; }
+    st.axes[0] = Math.max(-1, Math.min(1, x));
+    st.axes[1] = Math.max(-1, Math.min(1, y));
+    xpadSetBtn(BTN.A, xpadHas('A'));
+    xpadSetBtn(BTN.B, xpadHas('B'));
+    xpadSetBtn(BTN.X, xpadHas('X'));
+    xpadSetBtn(BTN.Y, xpadHas('Y'));
+    xpadSetBtn(BTN.LB, xpadHas('LB'));
+    xpadSetBtn(BTN.RB, xpadHas('RB'));
+    xpadSetBtn(BTN.LT, !!(xpadHas('LT') || xpadMouse._ltKey));
+    xpadSetBtn(BTN.RT, !!(xpadHas('RT') || xpadMouse._rtKey));
+    xpadSetBtn(BTN.VIEW, xpadHas('VIEW'));
+    xpadSetBtn(BTN.MENU, xpadHas('MENU'));
+    xpadSetBtn(BTN.L3, xpadHas('L3'));
+    xpadSetBtn(BTN.R3, xpadHas('R3'));
+    xpadSetBtn(BTN.UP, xpadHas('UP'));
+    xpadSetBtn(BTN.DOWN, xpadHas('DOWN'));
+    xpadSetBtn(BTN.LEFT, xpadHas('LEFT'));
+    xpadSetBtn(BTN.RIGHT, xpadHas('RIGHT'));
+    xpadSetBtn(16, xpadHas('NEXUS'));
+    xpadSetBtn(17, xpadHas('SHARE'));
+    st.timestamp = performance.now();
+  }
+  // Mouse -> Analógico DIR (mira). Decai p/ 0 quando para, como um analógico real.
+  function xpadOnMouseMove(dx, dy) {
+    var st = xpadEnsureState();
+    var f = (xpad.sens || 0.9) / 220;
+    xpadMouse.rx = Math.max(-1, Math.min(1, xpadMouse.rx + dx * f));
+    xpadMouse.ry = Math.max(-1, Math.min(1, xpadMouse.ry + dy * f));
+    xpadMouse.lastMove = performance.now();
+    st.axes[2] = xpadMouse.rx; st.axes[3] = xpadMouse.ry; st.timestamp = performance.now();
+  }
+  (function xpadDecayLoop() {
+    try {
+      if (xpadState && performance.now() - xpadMouse.lastMove > 60) {
+        xpadMouse.rx *= 0.82; xpadMouse.ry *= 0.82;
+        if (Math.abs(xpadMouse.rx) < 0.02) xpadMouse.rx = 0;
+        if (Math.abs(xpadMouse.ry) < 0.02) xpadMouse.ry = 0;
+        xpadState.axes[2] = xpadMouse.rx; xpadState.axes[3] = xpadMouse.ry;
+      }
+    } catch (e) {}
+    requestAnimationFrame(xpadDecayLoop);
+  })();
+  function xpadIsTypingTarget(t) {
+    try {
+      if (!t) return false;
+      var tag = (t.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+      if (t.isContentEditable) return true;
+      if (t.closest && t.closest('#bx-unified-panel, #bx-toggle-btn, #bx-xpad-touch, input, textarea, select')) return true;
+    } catch (e) {}
+    return false;
+  }
+  function xpadOnKey(e, down) {
+    try {
+      var code = e.code || e.key || '';
+      if (xpadRebinding && down) {
+        if (code === 'Escape') { xpadCancelRebind(); if (e.preventDefault) e.preventDefault(); return; }
+        if (code === 'F5' || code === 'MetaLeft' || code === 'MetaRight' || code === 'OSLeft' || code === 'OSRight') return;
+        if (!code) return;
+        var act = xpadRebinding.action;
+        xpadSetKey(act, code);
+        saveXpadKeymap(); saveXpadPreset(); xpadRefreshFromKeys();
+        var cb = xpadRebinding.onDone; xpadRebinding = null;
+        if (cb) { try { cb(code); } catch (err2) {} }
+        if (e.preventDefault) e.preventDefault();
+        if (e.stopPropagation) e.stopPropagation();
+        return;
+      }
+      if (xpadRebinding && !down) return;
+      if (!xpad.enabled) return;
+      if (isAutomating) return;
+      if (xpadIsTypingTarget(e.target)) return;
+      var used = xpadAllCodes();
+      if (used.indexOf(code) === -1) return;
+      if (!getStreamElements().length) return;
+      if (down) { if (xpadKeys[code]) return; xpadKeys[code] = true; } else { delete xpadKeys[code]; }
+      xpadRefreshFromKeys();
+      if (e.preventDefault) e.preventDefault();
+      if (e.stopPropagation) e.stopPropagation();
+    } catch (err) {}
+  }
+  window.addEventListener('keydown', function (e) { xpadOnKey(e, true); }, true);
+  window.addEventListener('keyup', function (e) { xpadOnKey(e, false); }, true);
+  window.addEventListener('blur', function () { xpadKeys = {}; try { xpadRefreshFromKeys(); } catch (e) {} });
+  // Mouse — clique = gatilho | movimento = mira
+  document.addEventListener('mousemove', function (e) {
+    try {
+      if (!xpad.enabled || isAutomating) return;
+      if (xpadMouse.locked) { xpadOnMouseMove(e.movementX || 0, e.movementY || 0); return; }
+      if (xpad.mouseMode === 'drag' && xpadMouse.dragging) {
+        var dx = e.clientX - xpadMouse.lastX, dy = e.clientY - xpadMouse.lastY;
+        xpadMouse.lastX = e.clientX; xpadMouse.lastY = e.clientY;
+        xpadOnMouseMove(dx * 2.2, dy * 2.2);
+      }
+    } catch (err) {}
+  }, true);
+  document.addEventListener('mousedown', function (e) {
+    try {
+      if (!xpad.enabled || isAutomating) return;
+      if (xpadIsTypingTarget(e.target)) return;
+      if (!getStreamElements().length) return;
+      if (xpad.mouseMode === 'drag') { xpadMouse.dragging = true; xpadMouse.lastX = e.clientX; xpadMouse.lastY = e.clientY; }
+      if (e.button === 0) { xpadMouse._rtKey = true; xpadRefreshFromKeys(); }
+      if (e.button === 2) { xpadMouse._ltKey = true; xpadRefreshFromKeys(); }
+      if (e.button === 1) { xpadSetBtn(BTN.R3, true); }
+    } catch (err) {}
+  }, true);
+  window.addEventListener('mouseup', function (e) {
+    try {
+      xpadMouse.dragging = false;
+      if (e.button === 0) { xpadMouse._rtKey = false; xpadRefreshFromKeys(); }
+      if (e.button === 2) { xpadMouse._ltKey = false; xpadRefreshFromKeys(); }
+      if (e.button === 1) { xpadSetBtn(BTN.R3, false); }
+    } catch (err) {}
+  }, true);
+  document.addEventListener('contextmenu', function (e) {
+    try { if (xpad.enabled && !isAutomating && getStreamElements().length && !xpadIsTypingTarget(e.target)) e.preventDefault(); } catch (err) {}
+  });
+  document.addEventListener('pointerlockchange', function () {
+    xpadMouse.locked = !!(document.pointerLockElement);
+  });
+  function xpadRequestMouseLock() {
+    try {
+      var el = getStreamElements()[0] || document.querySelector('video') || document.body;
+      if (el && el.requestPointerLock) el.requestPointerLock();
+      else if (document.body && document.body.requestPointerLock) document.body.requestPointerLock();
+    } catch (e) {}
+  }
+
+  // ---------- XPAD TOUCH — overlay p/ Safari no iPhone (sem teclado/mouse) ----------
+  function xpadBuildTouch() {
+    try {
+      if (document.getElementById('bx-xpad-touch')) return;
+      if (!document.body) { setTimeout(xpadBuildTouch, 800); return; }
+      var st = document.createElement('style');
+      st.textContent = [
+        '#bx-xpad-touch{position:fixed;left:0;right:0;bottom:0;z-index:9999990;pointer-events:none;display:none;padding:10px 10px calc(10px + env(safe-area-inset-bottom));justify-content:space-between;align-items:flex-end;gap:10px;}',
+        '#bx-xpad-touch.on{display:flex;}',
+        '.xpad-stick{width:128px;height:128px;border-radius:50%;background:rgba(255,255,255,.08);border:2px solid rgba(255,255,255,.35);position:relative;pointer-events:auto;touch-action:none;}',
+        '.xpad-knob{position:absolute;left:50%;top:50%;width:56px;height:56px;margin:-28px 0 0 -28px;border-radius:50%;background:rgba(0,255,136,.85);box-shadow:0 4px 14px rgba(0,0,0,.5);}',
+        '.xpad-btns{display:grid;grid-template-columns:repeat(4,52px);gap:7px;pointer-events:auto;}',
+        '.xpad-btn{width:52px;height:52px;border-radius:50%;border:2px solid rgba(255,255,255,.4);background:rgba(0,0,0,.55);color:#fff;font-weight:900;font-size:13px;display:flex;align-items:center;justify-content:center;touch-action:none;user-select:none;-webkit-user-select:none;}',
+        '.xpad-btn.hit{background:#00ff88;color:#000;border-color:#00ff88;}',
+        '.xpad-btn.wide{grid-column:span 2;width:auto;border-radius:26px;font-size:11px;}',
+        '#bx-xpad-touch .xpad-lbl{position:absolute;left:0;right:0;bottom:-18px;text-align:center;font-size:9px;color:rgba(255,255,255,.6);}'
+      ].join('\n');
+      document.documentElement.appendChild(st);
+      var wrap = document.createElement('div'); wrap.id = 'bx-xpad-touch';
+      wrap.innerHTML = '<div class="xpad-stick" id="xpad-stick"><div class="xpad-knob" id="xpad-knob"></div><div class="xpad-lbl">MOVER</div></div>' +
+        '<div class="xpad-btns">' +
+        '<div class="xpad-btn" data-btn="LB">LB</div><div class="xpad-btn" data-btn="RB">RB</div><div class="xpad-btn" data-btn="LT">LT</div><div class="xpad-btn" data-btn="RT">RT</div>' +
+        '<div class="xpad-btn" data-btn="X">X</div><div class="xpad-btn" data-btn="Y">Y</div><div class="xpad-btn" data-btn="A">A</div><div class="xpad-btn" data-btn="B">B</div>' +
+        '<div class="xpad-btn wide" data-btn="VIEW">VIEW</div><div class="xpad-btn wide" data-btn="MENU">PAUSE</div>' +
+        '</div>';
+      document.body.appendChild(wrap);
+      // Botões — toque = aperta, solta = solta
+      wrap.querySelectorAll('.xpad-btn').forEach(function (b) {
+        var name = b.getAttribute('data-btn');
+        var idx = BTN[name]; if (idx === undefined) return;
+        function down(e) { try { e.preventDefault(); } catch (_) {} b.classList.add('hit'); xpadSetBtn(idx, true); if (xpadState) xpadState.timestamp = performance.now(); }
+        function up(e) { try { e.preventDefault(); } catch (_) {} b.classList.remove('hit'); xpadSetBtn(idx, false); }
+        b.addEventListener('touchstart', down, { passive: false });
+        b.addEventListener('touchend', up, { passive: false });
+        b.addEventListener('touchcancel', up, { passive: false });
+        b.addEventListener('mousedown', down); b.addEventListener('mouseup', up); b.addEventListener('mouseleave', up);
+      });
+      // Analógico esquerdo por toque
+      var stick = wrap.querySelector('#xpad-stick'), knob = wrap.querySelector('#xpad-knob'), tid = null;
+      function stickMove(t) {
+        var r = stick.getBoundingClientRect();
+        var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        var dx = Math.max(-1, Math.min(1, (t.clientX - cx) / (r.width / 2)));
+        var dy = Math.max(-1, Math.min(1, (t.clientY - cy) / (r.height / 2)));
+        var len = Math.sqrt(dx * dx + dy * dy); if (len > 1) { dx /= len; dy /= len; }
+        xpadTouch.lx = dx; xpadTouch.ly = dy; xpadTouch.active = true;
+        knob.style.transform = 'translate(' + (dx * 34) + 'px,' + (dy * 34) + 'px)';
+        xpadRefreshFromKeys();
+      }
+      function stickEnd() { tid = null; xpadTouch.lx = 0; xpadTouch.ly = 0; xpadTouch.active = false; knob.style.transform = ''; xpadRefreshFromKeys(); }
+      stick.addEventListener('touchstart', function (e) { try { e.preventDefault(); } catch (_) {} var t = e.changedTouches[0]; tid = t.identifier; stickMove(t); }, { passive: false });
+      stick.addEventListener('touchmove', function (e) { try { e.preventDefault(); } catch (_) {} for (var i = 0; i < e.changedTouches.length; i++) if (e.changedTouches[i].identifier === tid) stickMove(e.changedTouches[i]); }, { passive: false });
+      stick.addEventListener('touchend', stickEnd, { passive: false });
+      stick.addEventListener('touchcancel', stickEnd, { passive: false });
+      xpadUpdateTouchVisibility();
+    } catch (e) {}
+  }
+  function xpadUpdateTouchVisibility() {
+    try {
+      var w = document.getElementById('bx-xpad-touch'); if (!w) return;
+      w.classList.toggle('on', !!(xpad.enabled && xpad.showTouch));
+    } catch (e) {}
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { setTimeout(xpadBuildTouch, 1500); });
+  else setTimeout(xpadBuildTouch, 1500);
+  setInterval(xpadBuildTouch, 4000);
+
+  // ==================== FIM XPAD (lógica) — overlay de toque vem em xpadBuildTouch() ====================
   // Re-instala o patch se o Xbox / H4YZ1N-Better Cloud sobrescrever getGamepads
   // (acontece nos 2 modos ao trocar de jogo/modo — era o que matava o cheat no Remote)
   function installGamepadPatch() {
@@ -738,12 +1095,25 @@ main();
       var patched = function () {
         var real = [];
         try { real = origGetGamepads() || []; } catch (e) { real = []; }
-        if (!isAutomating || !virtualState) return real;
-        virtualState.timestamp = performance.now();
-        // Virtual no slot 0 (é o que o jogo lê) + controles reais deslocados p/ 1..3
-        var res = [virtualState];
-        for (var i = 0; i < 3; i++) res.push(real[i] || null);
-        return res;
+        var hasReal = false;
+        for (var i = 0; i < real.length; i++) { if (real[i] && real[i].connected) { hasReal = true; break; } }
+        // 1) Cheat do GTA tem prioridade total
+        if (isAutomating && virtualState) {
+          virtualState.timestamp = performance.now();
+          var resCheat = [virtualState];
+          for (var c = 0; c < 3; c++) resCheat.push(real[c] || null);
+          return resCheat;
+        }
+        // 2) XPAD ligado + (sem controle físico OU forçado) -> virtual no slot 0
+        if (xpad.enabled && (!hasReal || xpad.force)) {
+          var xs = xpadEnsureState();
+          xs.timestamp = performance.now();
+          var resX = [xs];
+          for (var j = 0; j < 3; j++) resX.push(real[j] || null);
+          return resX;
+        }
+        // 3) Senão, deixa o controle físico / site como está
+        return real;
       };
       patched._bxDualPatched = true;
       navigator.getGamepads = patched;
@@ -830,6 +1200,7 @@ main();
       '<div id="bx-unified-header"><span>🚀 H4YZ1N-Better Cloud UNIFIED + DLSS5 + RHI</span><div><span id="bx-min" style="cursor:pointer; margin-right:10px;">—</span><span id="bx-close" style="cursor:pointer">✕</span></div></div>' +
       '<div id="bx-tabs">' +
         '<div class="bx-tab active" data-tab="geral">GERAL</div>' +
+        '<div class="bx-tab" data-tab="xpad">XPAD 🎮</div>' +
         '<div class="bx-tab" data-tab="dlss">DLSS 5</div>' +
         '<div class="bx-tab" data-tab="rhi">RHI</div>' +
         '<div class="bx-tab" data-tab="gta">GTA V</div>' +
@@ -868,6 +1239,26 @@ main();
         '<div style="font-size:10px; color:#888; padding:0 0 8px;">Entre no jogo (Remote ou Nuvem) e toque no cheat. O controle virtual injeta os botões nos 2 modos.</div>' +
         '<div id="gta-filters" style="display:flex; gap:5px; flex-wrap:wrap; margin-bottom:8px;"></div>' +
         '<div id="gta-list"></div>' +
+      '</div>' +
+      '<div id="bx-content-xpad" class="bx-tab-content">' +
+        '<div class="bx-section-title">XPAD — TECLADO + MOUSE VIRAM CONTROLE</div>' +
+        '<div style="font-size:10px; color:#888; padding:0 0 8px;">Funciona em Remote (canvas) e Nuvem (video). Se um controle físico estiver conectado, o XPAD cede o slot 0 — ligue "Forçar XPAD" p/ passar por cima dele.</div>' +
+        '<div class="bx-control"><label>XPAD ligado</label><div class="bx-switch on" id="sw-xpad"></div></div>' +
+        '<div class="bx-control"><label>Forçar XPAD (mesmo com controle físico)</label><div class="bx-switch" id="sw-xpad-force"></div></div>' +
+        '<div class="bx-control"><label>Mostrar botões na tela (iPhone / toque)</label><div class="bx-switch" id="sw-xpad-touch"></div></div>' +
+        '<div class="bx-control"><label>Mouse</label><select id="xpad-mouse"><option value="lock">Travar mouse (clique no jogo)</option><option value="drag">Arrastar p/ mirar</option></select></div>' +
+        '<div class="bx-control"><label>Sens. mira (mouse)</label><input type="range" id="xpad-sens" min="0.2" max="2" step="0.1" value="0.9"></div>' +
+        '<button id="btn-xpad-lock" style="width:100%; padding:10px; background:#00ccff; color:#000; border:none; border-radius:10px; font-weight:800; margin-top:8px; cursor:pointer;">🎯 TRAVAR MOUSE NO JOGO (clique p/ mirar)</button>' +
+        '<div class="bx-section-title">🎮 PRESETS — TECLAS DE PC</div>' +
+        '<div style="font-size:10px; color:#888; padding:0 0 8px;">Um toque e todas as teclas mudam p/ o jeito de PC daquele jogo. Depois você ainda pode trocar tecla por tecla abaixo.</div>' +
+        '<div id="xpad-preset-btns" style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:6px;"></div>' +
+        '<div id="xpad-preset-desc" style="font-size:11px; line-height:1.5; background:#111; border:1px solid #222; border-radius:10px; padding:10px; margin-bottom:4px;"></div>' +
+        '<div class="bx-section-title">⌨️ REDEFINIR TECLAS — TECLA → BOTÃO XBOX</div>' +
+        '<div style="font-size:10px; color:#888; padding:0 0 8px;">Aperta <b>Trocar</b> e depois aperta a tecla nova. Se a tecla já era de outro botão, ela muda de dono. <b>ESC</b> cancela. Clique do mouse continua valendo p/ LT/RT.</div>' +
+        '<div id="xpad-remap-list"></div>' +
+        '<div id="xpad-remap-hint" style="font-size:10px; color:#00ccff; padding:6px; min-height:16px;"></div>' +
+        '<button id="btn-xpad-reset-keys" style="width:100%; padding:10px; background:#222; color:#eee; border:1px solid #333; border-radius:10px; font-weight:800; margin-top:4px; cursor:pointer;">↩ RESTAURAR TECLAS PADRÃO</button>' +
+        '<div id="xpad-status" style="font-size:10px; color:#666; padding:6px;">XPAD: aguardando stream…</div>' +
       '</div>' +
       '<div id="bx-status">Unificado pronto - H4YZ1N-Better Cloud + Remote Play</div>' +
       '<div id="bx-credits">© 2026 <b style="color:#00ff88;">H4YZ1N-Better Cloud</b> • por <b>H4YZ1N</b> — <a href="https://www.instagram.com/xzfelipezs" target="_blank" style="color:#00ccff; font-weight:800; text-decoration:none;">📸 @xzfelipezs</a><br><span style="font-size:10px; color:#666;">Todos os direitos reservados • Base: H4YZ1N-Better</span></div>';
@@ -993,6 +1384,129 @@ main();
     }
     renderGtaFilters(); renderGta();
 
+    // XPAD — wiring da aba
+    try {
+      var swXpad = panel.querySelector('#sw-xpad');
+      var swXpadForce = panel.querySelector('#sw-xpad-force');
+      var swXpadTouch = panel.querySelector('#sw-xpad-touch');
+      var xpadMouseSel = panel.querySelector('#xpad-mouse');
+      var xpadSens = panel.querySelector('#xpad-sens');
+      var xpadStatusEl = panel.querySelector('#xpad-status');
+      if (swXpad) {
+        if (xpad.enabled) swXpad.classList.add('on'); else swXpad.classList.remove('on');
+        swXpad.onclick = function () { swXpad.classList.toggle('on'); xpad.enabled = swXpad.classList.contains('on'); saveXpad(); xpadUpdateTouchVisibility(); statusEl.textContent = 'XPAD ' + (xpad.enabled ? 'LIGADO' : 'DESLIGADO') + ' — ' + getModeLabel(getBxMode()); };
+      }
+      if (swXpadForce) {
+        if (xpad.force) swXpadForce.classList.add('on');
+        swXpadForce.onclick = function () { swXpadForce.classList.toggle('on'); xpad.force = swXpadForce.classList.contains('on'); saveXpad(); statusEl.textContent = 'XPAD forçado: ' + (xpad.force ? 'SIM (passa por cima do controle físico)' : 'NÃO (cede p/ controle físico)'); };
+      }
+      if (swXpadTouch) {
+        if (xpad.showTouch) swXpadTouch.classList.add('on');
+        swXpadTouch.onclick = function () { swXpadTouch.classList.toggle('on'); xpad.showTouch = swXpadTouch.classList.contains('on'); saveXpad(); xpadBuildTouch(); xpadUpdateTouchVisibility(); };
+      }
+      if (xpadMouseSel) {
+        xpadMouseSel.value = xpad.mouseMode || 'lock';
+        xpadMouseSel.onchange = function () { xpad.mouseMode = xpadMouseSel.value; saveXpad(); };
+      }
+      if (xpadSens) {
+        xpadSens.value = xpad.sens;
+        xpadSens.oninput = function () { xpad.sens = parseFloat(xpadSens.value) || 0.9; saveXpad(); };
+      }
+      var btnLock = panel.querySelector('#btn-xpad-lock');
+      if (btnLock) btnLock.onclick = function () { xpadRequestMouseLock(); statusEl.textContent = 'XPAD: mouse travado — mexe o mouse p/ mirar, ESC solta'; };
+      // Status do XPAD: mostra se o jogo está lendo o virtual ou o físico
+      setInterval(function () {
+        try {
+          if (!xpadStatusEl) return;
+          var gp = null; try { var all = navigator.getGamepads() || []; gp = all[0] || null; } catch (e) {}
+          if (!xpad.enabled) xpadStatusEl.textContent = 'XPAD: desligado — o jogo usa o controle físico / toque do Xbox.';
+          else if (gp && gp.id && gp.id.indexOf('XPAD') !== -1) xpadStatusEl.textContent = 'XPAD: ATIVO — o jogo está lendo o controle virtual (teclado+mouse). Aperta WASD p/ testar.';
+          else if (gp && gp.connected) xpadStatusEl.textContent = 'XPAD: em espera — controle físico detectado (' + gp.id + '). Ligue "Forçar XPAD" p/ usar teclado+mouse.';
+          else xpadStatusEl.textContent = 'XPAD: ligado, aguardando o jogo ler o controle virtual…';
+        } catch (e) {}
+      }, 2000);
+      // XPAD — PRESETS + REDEFINIR TECLAS
+      var presetBtns = panel.querySelector('#xpad-preset-btns');
+      var presetDesc = panel.querySelector('#xpad-preset-desc');
+      var remapList = panel.querySelector('#xpad-remap-list');
+      var remapHint = panel.querySelector('#xpad-remap-hint');
+      function renderXpadPresets() {
+        if (presetDesc) {
+          if (xpadPreset === 'custom') presetDesc.textContent = '✏️ Personalizado — você trocou tecla(s) na mão. Aperta um preset p/ voltar p/ um mapa pronto.';
+          else { var p = XPAD_PRESETS[xpadPreset] || XPAD_PRESETS.padrao; presetDesc.textContent = p.emoji + ' ' + p.label + ' — ' + p.desc; }
+        }
+        if (!presetBtns) return;
+        presetBtns.innerHTML = '';
+        XPAD_PRESET_ORDER.forEach(function (id) {
+          var p = XPAD_PRESETS[id];
+          var b = document.createElement('button');
+          b.textContent = p.emoji + ' ' + p.label;
+          var active = (xpadPreset === id);
+          b.style.cssText = 'padding:10px 6px; border-radius:10px; font-weight:800; font-size:12px; cursor:pointer; border:1px solid ' + (active ? '#00ff88' : '#333') + '; background:' + (active ? '#00ff88' : '#1e1e1e') + '; color:' + (active ? '#000' : '#eee') + ';';
+          b.onclick = function () {
+            if (xpadPreset === id) return;
+            if (xpadPreset === 'custom' && !confirm('Trocar p/ "' + p.label + '" vai sobrescrever suas teclas personalizadas. Continuar?')) return;
+            if (xpadRebinding) xpadCancelRebind();
+            xpadApplyPreset(id);
+            renderXpadPresets(); renderXpadRemap();
+            if (remapHint) remapHint.textContent = '✅ Preset aplicado: ' + p.label;
+            statusEl.textContent = 'XPAD preset: ' + p.label;
+          };
+          presetBtns.appendChild(b);
+        });
+        if (xpadPreset === 'custom') {
+          var c = document.createElement('div');
+          c.textContent = '✏️ Personalizado';
+          c.style.cssText = 'padding:10px 6px; border-radius:10px; font-weight:800; font-size:12px; text-align:center; border:1px solid #ffcc00; background:#2a2200; color:#ffcc00; grid-column:span 2;';
+          presetBtns.appendChild(c);
+        }
+      }
+      function renderXpadRemap() {
+        if (!remapList) return;
+        remapList.innerHTML = '';
+        XPAD_ACTION_ORDER.forEach(function (action) {
+          var row = document.createElement('div');
+          row.className = 'bx-control';
+          row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; padding:7px 10px; background:#171717; border-radius:10px; margin-bottom:6px; border:1px solid #252525;';
+          var left = document.createElement('div');
+          left.style.cssText = 'display:flex; flex-direction:column; gap:1px;';
+          var lab = document.createElement('span');
+          lab.textContent = XPAD_ACTION_LABELS[action] || action;
+          lab.style.cssText = 'font-size:12px; font-weight:600;';
+          var keySpan = document.createElement('span');
+          keySpan.textContent = xpadKeymapLabel(action);
+          keySpan.style.cssText = 'font-size:11px; color:#00ff88; font-weight:800;';
+          left.appendChild(lab); left.appendChild(keySpan);
+          var btn = document.createElement('button');
+          btn.textContent = 'Trocar';
+          btn.style.cssText = 'background:#00ccff; color:#000; border:none; border-radius:8px; padding:6px 12px; font-weight:800; font-size:11px; cursor:pointer; flex-shrink:0; margin-left:8px;';
+          btn.onclick = function (ev) {
+            try { ev.stopPropagation(); } catch (e2) {}
+            if (xpadRebinding) { xpadCancelRebind(); renderXpadRemap(); renderXpadPresets(); if (remapHint) remapHint.textContent = ''; return; }
+            btn.textContent = 'Aperte uma tecla…';
+            btn.style.background = '#ffcc00';
+            if (remapHint) remapHint.textContent = '⏳ Apertando tecla p/ ' + (XPAD_ACTION_LABELS[action] || action) + ' — aperta a tecla nova ou ESC p/ cancelar.';
+            xpadRebinding = { action: action, onDone: function (code) {
+              if (remapHint) remapHint.textContent = code ? ('✅ ' + (XPAD_ACTION_LABELS[action] || action) + ' agora é ' + xpadKeyLabel(code) + ' — salvo!') : 'Cancelado.';
+              renderXpadRemap(); renderXpadPresets();
+              statusEl.textContent = code ? ('XPAD: ' + (XPAD_ACTION_LABELS[action] || action) + ' = ' + xpadKeyLabel(code)) : 'XPAD: redefinição cancelada';
+            } };
+          };
+          row.appendChild(left); row.appendChild(btn);
+          remapList.appendChild(row);
+        });
+      }
+      renderXpadPresets(); renderXpadRemap();
+      var btnResetKeys = panel.querySelector('#btn-xpad-reset-keys');
+      if (btnResetKeys) btnResetKeys.onclick = function () {
+        if (!confirm('Restaurar todas as teclas do XPAD p/ o padrão? (WASD, Espaço=A, Shift=B, Enter=Pause…)')) return;
+        xpadResetKeymap(); renderXpadPresets(); renderXpadRemap();
+        if (remapHint) remapHint.textContent = '↩ Teclas restauradas p/ o padrão.';
+        statusEl.textContent = 'XPAD: teclas restauradas p/ o padrão';
+      };
+    } catch (e) {}
+
+
     // Arrastar (mouse + touch p/ Safari mobile)
     var isDragging = false, offX = 0, offY = 0;
     var header = panel.querySelector('#bx-unified-header');
@@ -1081,6 +1595,7 @@ main();
     brightness: 0, contrast: 1.0, saturation: 1.0, hue: 0, temp: 0,
     shadows: 0, highlights: 0, vibrance: 0.15, gamma: 1.0,
     hdr: 'off', exposure: 1.0,
+    vibe: 'off', vibeStrength: 0.85,
     fg: 'off', lowLatency: true
   };
   var S = {};
@@ -1127,6 +1642,7 @@ main();
     'uniform float u_brightness; uniform float u_contrast; uniform float u_saturation; uniform float u_hue; uniform float u_temp;',
     'uniform float u_shadows; uniform float u_highlights; uniform float u_vibrance; uniform float u_gamma;',
     'uniform float u_hdr; uniform float u_exposure; uniform float u_fgMix;',
+    'uniform float u_vibe; uniform float u_vibeStrength;',
     'float luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }',
     'vec3 hueRot(vec3 c, float a){',
     '  float s = sin(a), co = cos(a);',
@@ -1191,6 +1707,37 @@ main();
     '  col += u_shadows * smoothstep(0.35, 0.0, l) * 0.30;',
     '  col += u_highlights * smoothstep(0.55, 1.0, l) * 0.30;',
     '  col = pow(max(col, vec3(0.0)), vec3(1.0 / max(u_gamma, 0.2)));',
+    // --- H4YZ1N VIBES GTA: grade por cima dos ajustes de COR (nao zera sliders) ---
+    '  if (u_vibe > 0.5 && u_vibeStrength > 0.001) {',
+    '    vec3 vc = col; float vl = luma(col);',
+    '    vec2 q = vUv - 0.5; float vig = 1.0 - dot(q, q) * 0.55;',
+    '    if (u_vibe > 0.5 && u_vibe < 1.5) {',
+    '      vec3 warm = vc; warm.r *= 1.10; warm.g *= 1.02; warm.b *= 0.88;',
+    '      vec3 sepia = vec3(dot(warm, vec3(0.393, 0.769, 0.189)), dot(warm, vec3(0.349, 0.686, 0.168)), dot(warm, vec3(0.272, 0.534, 0.131)));',
+    '      warm = mix(warm, sepia, 0.22);',
+    '      warm = warm * 0.96 + vec3(0.045, 0.030, 0.015);',
+    '      warm.r += (vl * 0.08); warm.b -= (1.0 - vl) * 0.03;',
+    '      warm *= mix(1.0, vig, 0.35); warm += vec3(0.03, 0.015, 0.0) * (1.0 - vig);',
+    '      vc = warm;',
+    '    } else if (u_vibe >= 1.5 && u_vibe < 2.5) {',
+    '      vec3 cold = mix(vec3(vl), vc, 0.62);',
+    '      cold = (cold - 0.5) * 1.14 + 0.5;',
+    '      cold.r *= 0.96; cold.g *= 1.01; cold.b *= 1.08;',
+    '      cold *= 0.94 + vl * 0.06;',
+    '      cold = mix(cold, cold * vec3(0.92, 0.95, 1.05), 1.0 - vl);',
+    '      vc = cold;',
+    '    } else if (u_vibe >= 2.5) {',
+    '      vec3 neon = vc;',
+    '      float nl = luma(neon); neon = mix(vec3(nl), neon, 1.28);',
+    '      neon.r *= 1.10; neon.g *= 0.92; neon.b *= 1.14;',
+    '      neon += vec3(0.10, 0.01, 0.16) * (1.0 - nl) * (1.0 - nl);',
+    '      neon += vec3(0.12, 0.03, 0.07) * nl * nl;',
+    '      neon.g += 0.035 * (1.0 - abs(nl - 0.5) * 2.0);',
+    '      neon = neon * mix(1.0, vig, 0.45) + vec3(0.05, 0.0, 0.09) * (1.0 - vig);',
+    '      vc = neon;',
+    '    }',
+    '    col = mix(col, vc, clamp(u_vibeStrength, 0.0, 1.0));',
+    '  }',
     '  col *= u_exposure;',
     // HDR tone mapping
     '  if (u_hdr > 0.5 && u_hdr < 1.5) col = aces(col);',
@@ -1226,7 +1773,7 @@ main();
       gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
       ['u_tex', 'u_prev', 'u_res', 'u_time', 'u_nrTemporal', 'u_nrSpatial', 'u_protect', 'u_cas', 'u_aa',
        'u_brightness', 'u_contrast', 'u_saturation', 'u_hue', 'u_temp', 'u_shadows', 'u_highlights',
-       'u_vibrance', 'u_gamma', 'u_hdr', 'u_exposure', 'u_fgMix'].forEach(function (n) { U[n] = gl.getUniformLocation(prog, n); });
+       'u_vibrance', 'u_gamma', 'u_hdr', 'u_exposure', 'u_fgMix', 'u_vibe', 'u_vibeStrength'].forEach(function (n) { U[n] = gl.getUniformLocation(prog, n); });
       function mkTex() {
         var tx = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, tx);
@@ -1305,6 +1852,9 @@ main();
       gl.uniform1f(U.u_gamma, S.gamma);
       gl.uniform1f(U.u_hdr, S.hdr === 'aces' ? 1 : S.hdr === 'reinhard' ? 2 : 0);
       gl.uniform1f(U.u_exposure, S.exposure);
+      var vibeId = S.vibe === 'sa' ? 1 : S.vibe === 'iv' ? 2 : S.vibe === 'vi' ? 3 : 0;
+      gl.uniform1f(U.u_vibe, vibeId);
+      gl.uniform1f(U.u_vibeStrength, (typeof S.vibeStrength === 'number' ? S.vibeStrength : 0.85));
       fgToggle = !fgToggle;
       gl.uniform1f(U.u_fgMix, S.fg === '2x' ? (fgToggle ? 0.5 : 0.0) : 0.0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -1431,6 +1981,22 @@ main();
     content.appendChild(row('Realces', slider(-0.5, 0.5, 0.01, S.highlights, function (v) { S.highlights = v; save(); })));
     content.appendChild(row('Vibrância', slider(0, 1, 0.01, S.vibrance, function (v) { S.vibrance = v; save(); })));
     content.appendChild(row('Gama', slider(0.6, 1.8, 0.01, S.gamma, function (v) { S.gamma = v; save(); })));
+    sec('🎨 FILTROS — VIBE GTA');
+    var vibeNote = el('div', '', 'Precisa do <b>Veyra Master ON</b>. O vibe aplica por cima dos teus ajustes de COR — não zera Brilho / Contraste / Saturação.');
+    vibeNote.style.cssText = 'font-size:10px; color:#aaa; padding:6px; background:#1a0f22; border:1px solid #3a1a55; border-radius:8px; margin-bottom:6px;';
+    content.appendChild(vibeNote);
+    var vibeSelect = select([['off', 'Desligado — Normal'], ['sa', '🟠 GTA SA — Pôr do sol / poeira'], ['iv', '🌫️ GTA IV — Frio / cinza Liberty City'], ['vi', '🟣 GTA VI Vice City — Roxo / neon rosa']], S.vibe, function (v) { S.vibe = v; save(); });
+    content.appendChild(row('Vibe GTA', vibeSelect));
+    content.appendChild(row('Intensidade Vibe', slider(0, 1, 0.05, (typeof S.vibeStrength === 'number' ? S.vibeStrength : 0.85), function (v) { S.vibeStrength = v; save(); })));
+    var vibeBtns = el('div', '', '');
+    vibeBtns.style.cssText = 'display:flex; gap:6px; margin:2px 0 10px;';
+    [['off', '⛔ Off', '#222'], ['sa', '🟠 SA', '#ff8c1a'], ['iv', '🌫️ IV', '#5a6b7a'], ['vi', '🟣 VI', '#c44dff']].forEach(function (b) {
+      var btn = el('button', '', b[1]);
+      btn.style.cssText = 'flex:1; padding:9px 4px; background:' + b[2] + '; color:' + (b[0] === 'sa' ? '#000' : '#fff') + '; border:none; border-radius:10px; font-weight:800; font-size:12px; cursor:pointer;';
+      btn.onclick = function () { S.vibe = b[0]; vibeSelect.value = b[0]; save(); };
+      vibeBtns.appendChild(btn);
+    });
+    content.appendChild(vibeBtns);
     sec('HDR + FRAME GENERATION');
     content.appendChild(row('HDR', select([['off', 'Off'], ['aces', 'ACES'], ['reinhard', 'Reinhard']], S.hdr, function (v) { S.hdr = v; save(); })));
     content.appendChild(row('Exposição', slider(0.5, 2, 0.01, S.exposure, function (v) { S.exposure = v; save(); })));
